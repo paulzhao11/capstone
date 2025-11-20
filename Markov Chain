@@ -129,15 +129,17 @@ hashtags_long <- fashion_data %>%
   distinct(post_id, tag)
 
 # 3) Tag frequency and top N
-topN <- 20
 tag_counts <- hashtags_long %>%
   count(tag, sort = TRUE)
 
+# --- CHANGED PART: restrict to tags with n > 10, then take up to topN = 20 ---
 top_tags <- tag_counts %>%
-  slice_head(n = topN) %>%
+  filter(n > 10) %>%          # NEW: only keep tags that appear more than 10 times
+  slice_head(n = topN) %>%    # from those, take up to topN tags
   pull(tag)
 
-length(top_tags); head(top_tags)
+length(top_tags)
+head(top_tags)
 
 # Keep only rows with top tags
 ht_top <- hashtags_long %>%
@@ -182,7 +184,7 @@ simulate_walk <- function(
   posts_by_tag_list,
   tags_by_post_list,
   n_steps = 100000,
-  teleport_prob = 0.05
+  teleport_prob = 0.02
 ) {
   K <- length(posts_by_tag_list)
   M <- length(tags_by_post_list)
