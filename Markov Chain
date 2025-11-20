@@ -1,0 +1,247 @@
+library(ggplot2)
+library(dplyr)
+library(lubridate)
+
+fashion_data <- read.csv('/Users/zhaoshibo/Desktop/dataversefile1/fashiondataInstagram.csv')
+
+#filter data
+fashion_data <- fashion_data %>%
+  mutate(
+    Likes    = suppressWarnings(as.numeric(Likes)),
+    Comments = suppressWarnings(as.numeric(Comments))
+  ) %>%
+  filter(!is.na(Likes), !is.na(Comments),
+         Likes >= 25)   # keep only posts with meaningful engagement
+
+
+# --- helpers (do NOT rename columns; we only look them up) ---
+get_col <- function(df, primary, aliases = character()) {
+  # return the first column that exists, checking primary then aliases, without changing names
+  candidates <- c(primary, aliases)
+  hit <- candidates[candidates %in% names(df)]
+  if (length(hit) == 0) {
+    stop(sprintf("Column not found. Tried: %s", paste(candidates, collapse = ", ")))
+  }
+  hit[1]
+}
+
+# case-insensitive finder that returns the ACTUAL name (still doesn't rename anything)
+get_col_ci <- function(df, candidates) {
+  nms <- names(df)
+  ln  <- tolower(nms)
+  for (cand in candidates) {
+    idx <- which(ln == tolower(cand))
+    if (length(idx) > 0) return(nms[idx[1]])
+  }
+  stop(sprintf("Column not found (case-insensitive). Tried: %s", paste(candidates, collapse = ", ")))
+}
+
+# --- 1) coerce numeric columns if they exist (no renaming) ---
+num_wishlist <- c(
+  "Followings","Followers","MediaCount","Likes","Comments",
+  "Selfie","BodySnap","Marketing","ProductOnly","NonFashion","Face","Logo","BrandLogo",
+  "Smile","Outdoor","NumberOfPeople","NumberOfFashionProduct",
+  "Anger","Contempt","Disgust","Fear","Happiness","Neutral","Sadness","Surprise"
+)
+
+num_exist <- intersect(names(fashion_data), num_wishlist)
+if (length(num_exist) > 0) {
+  fashion_data <- fashion_data %>%
+    mutate(across(all_of(num_exist), ~ suppressWarnings(as.numeric(.x))))
+}
+
+# --- 2) creation time -> POSIXct/Date (keep original names; no renaming) ---
+time_candidates <- c(
+  "CreationTime","CreatedTime","Timestamp","Time","PostTime",
+  "Creation Time","Created Time","Post Time","Date","PostedDate","PostDate","Time.Date"
+)
+ct_name <- tryCatch(get_col_ci(fashion_data, time_candidates), error = function(e) NA_character_)
+if (is.na(ct_name)) stop("No time-like column found. Tried common names; add yours to time_candidates.")
+
+# Pattern: e.g. "1/27/16 8:26", "01/27/2016 08:26", "1/27/16 8:26:05", "1/27/16 8:26 PM"
+pat_mdy_time <- "^\\s*\\d{1,2}/\\d{1,2}/(\\d{2}|\\d{4})\\s+\\d{1,2}:\\d{2}(:\\d{2})?\\s*([AaPp][Mm])?\\s*$"
+
+# Keep only rows that match the pattern (drop the rest)
+keep_idx <- grepl(pat_mdy_time, as.character(fashion_data[[ct_name]]), perl = TRUE)
+
+# Optional: see how many will be removed
+dropped_n <- sum(!keep_idx)
+message(sprintf("Time rows kept: %d | dropped (non-matching): %d", sum(keep_idx), dropped_n))
+
+fashion_data <- fashion_data %>%
+  dplyr::filter(keep_idx) %>%
+  dplyr::mutate(
+    # Parse exactly the pattern we accepted: try HMS first, then HM; both allow 2- or 4-digit year, AM/PM
+    created_at = {
+      x <- as.character(.data[[ct_name]])
+      p <- suppressWarnings(lubridate::mdy_hms(x, tz = "UTC", quiet = TRUE))   # handles "... HH:MM:SS" ± AM/PM
+      need <- is.na(p)
+      if (any(need)) {
+        p[need] <- suppressWarnings(lubridate::mdy_hm(x[need], tz = "UTC", quiet = TRUE))  # "... HH:MM" ± AM/PM
+      }
+      # final tiny fallback with base for rare locales
+      need <- is.na(p)
+      if (any(need)) {
+        p[need] <- as.POSIXct(strptime(x[need], "%m/%d/%y %I:%M %p", tz = "UTC"))
+      }
+      need <- is.na(p)
+      if (any(need)) {
+        p[need] <- as.POSIXct(strptime(x[need], "%m/%d/%Y %I:%M %p", tz = "UTC"))
+      }
+      need <- is.na(p)
+      if (any(need)) {
+        p[need] <- as.POSIXct(strptime(x[need], "%m/%d/%y %H:%M", tz = "UTC"))
+      }
+      need <- is.na(p)
+      if (any(need)) {
+        p[need] <- as.POSIXct(strptime(x[need], "%m/%d/%Y %H:%M", tz = "UTC"))
+      }
+      p
+    },
+    date = as.Date(created_at)
+  ) %>%
+  filter(!is.na(date)) %>%
+  filter(date > as.Date("1970-01-01"))
+
+
+
+library(dplyr)
+library(stringr)
+library(tidyr)
+
+# 1) Detect hashtag column
+tag_col <- grep("hashtags", names(fashion_data), ignore.case = TRUE, value = TRUE)[1]
+stopifnot(!is.na(tag_col))
+
+# 2) Long table: post_id, tag
+fashion_data$post_id <- seq_len(nrow(fashion_data))
+
+hashtags_long <- fashion_data %>%
+  mutate(tags_raw = as.character(.data[[tag_col]])) %>%
+  filter(!is.na(tags_raw), tags_raw != "") %>%
+  mutate(tags_vec = str_split(tags_raw, ",")) %>%
+  unnest(tags_vec) %>%
+  transmute(
+    post_id,
+    tag = str_trim(tolower(tags_vec)) |> str_replace_all("^#", "")
+  ) %>%
+  filter(tag != "") %>%
+  distinct(post_id, tag)
+
+# 3) Tag frequency and top N
+topN <- 20
+tag_counts <- hashtags_long %>%
+  count(tag, sort = TRUE)
+
+top_tags <- tag_counts %>%
+  slice_head(n = topN) %>%
+  pull(tag)
+
+length(top_tags); head(top_tags)
+
+# Keep only rows with top tags
+ht_top <- hashtags_long %>%
+  filter(tag %in% top_tags)
+
+# Map tag -> integer index 1..K
+tag_levels <- sort(unique(ht_top$tag))
+K <- length(tag_levels)
+
+tag_to_idx <- setNames(seq_len(K), tag_levels)
+
+ht_top <- ht_top %>%
+  mutate(
+    tag_idx = tag_to_idx[tag],
+    post_idx = as.integer(factor(post_id))  # compress post IDs to 1..M
+  )
+
+M <- length(unique(ht_top$post_idx))
+
+# For each tag index, which posts contain it?
+posts_by_tag <- ht_top %>%
+  group_by(tag_idx) %>%
+  summarise(posts = list(unique(post_idx)), .groups = "drop") %>%
+  arrange(tag_idx)
+
+# For each post index, which tags does it contain?
+tags_by_post <- ht_top %>%
+  group_by(post_idx) %>%
+  summarise(tags = list(unique(tag_idx)), .groups = "drop") %>%
+  arrange(post_idx)
+
+# Convert lists for easy indexed access
+posts_by_tag_list <- posts_by_tag$posts
+tags_by_post_list <- tags_by_post$tags
+
+# Sanity:
+K; M
+
+set.seed(1)
+
+simulate_walk <- function(
+  posts_by_tag_list,
+  tags_by_post_list,
+  n_steps = 100000,
+  teleport_prob = 0.05
+) {
+  K <- length(posts_by_tag_list)
+  M <- length(tags_by_post_list)
+  
+  # Start at random tag
+  current_tag <- sample.int(K, 1)
+  
+  visits <- integer(K)
+  
+  for (step in seq_len(n_steps)) {
+    # Teleport with small probability
+    if (runif(1) < teleport_prob) {
+      current_tag <- sample.int(K, 1)
+    } else {
+      # Normal step: pick random post with this tag
+      posts_for_tag <- posts_by_tag_list[[current_tag]]
+      
+      if (length(posts_for_tag) == 0) {
+        # If no posts (shouldn't happen with top tags, but be safe): teleport
+        current_tag <- sample.int(K, 1)
+      } else {
+        post <- sample(posts_for_tag, 1)
+        
+        # From that post, pick random tag
+        tags_for_post <- tags_by_post_list[[post]]
+        if (length(tags_for_post) == 0) {
+          # fallback: stay or teleport
+          current_tag <- sample.int(K, 1)
+        } else {
+          current_tag <- sample(tags_for_post, 1)
+        }
+      }
+    }
+    # Record visit
+    visits[current_tag] <- visits[current_tag] + 1L
+  }
+  
+  tibble(
+    tag_idx = seq_len(K),
+    visits  = visits
+  )
+}
+
+walk_res <- simulate_walk(posts_by_tag_list, tags_by_post_list,
+                          n_steps = 200000, teleport_prob = 0.05)
+
+library(ggplot2)
+
+walk_scores <- walk_res %>%
+  mutate(
+    walk_score = visits / sum(visits),
+    tag        = tag_levels[tag_idx]
+  ) %>%
+  select(tag, walk_score, visits)
+
+# Join with raw counts
+rank_compare <- tag_counts %>%
+  filter(tag %in% tag_levels) %>%
+  left_join(walk_scores, by = "tag") %>%
+  arrange(desc(walk_score))
+
+head(rank_compare, 20)
