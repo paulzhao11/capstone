@@ -1,0 +1,266 @@
+---
+title: "4630 final project"
+output: html_document
+date: "2025-12-02"
+---
+
+```{r}
+library(tidyverse)
+library(rsample) # train/test split, CV
+library(yardstick) # RMSE, R^2
+library(glmnet) # ridge / lasso
+library(tree) # regression tree
+library(randomForest) # random forest
+
+airbnb_raw <- read_csv("/Users/zhaoshibo/Desktop/STAT 4630/AB_NYC_2019.csv")
+glimpse(airbnb_raw)
+
+airbnb <- airbnb_raw %>%
+  select(
+    price,
+    neighbourhood_group,
+    neighbourhood,
+    room_type,
+    minimum_nights,
+    number_of_reviews,
+    reviews_per_month,
+    calculated_host_listings_count,
+    availability_365,
+    latitude,
+    longitude
+  ) %>%
+  # filters for price
+  filter(price > 0, price <= 1000) %>%
+  # log-transform price & set factor types
+  mutate(
+    log_price = log(price),
+    neighbourhood_group = factor(neighbourhood_group),
+    neighbourhood       = factor(neighbourhood),
+    room_type           = factor(room_type),
+    # set NA to 0
+    reviews_per_month   = replace_na(reviews_per_month, 0)
+  ) %>%
+  drop_na()
+
+glimpse(airbnb)
+```
+
+EDA
+```{r}
+# Distribution of price and log_price
+
+airbnb %>%
+ggplot(aes(price)) +
+geom_histogram(bins = 50) +
+labs(title = "Distribution of Airbnb Prices (capped at 1000)")
+
+airbnb %>%
+ggplot(aes(log_price)) +
+geom_histogram(bins = 50) +
+labs(title = "Distribution of log(price)")
+
+
+# Boxplot by room type
+
+airbnb %>%
+ggplot(aes(room_type, price)) +
+geom_boxplot() +
+coord_cartesian(ylim = c(0, 500)) +  # avoid extreme tails
+labs(title = "Price by Room Type (capped at 500)")
+
+# Boxplot by borough
+
+airbnb %>%
+ggplot(aes(neighbourhood_group, price)) +
+geom_boxplot() +
+coord_cartesian(ylim = c(0, 500)) +
+labs(title = "Price by Borough (neighbourhood_group)")
+
+# Simple location scatter colored by borough
+
+airbnb %>%
+ggplot(aes(longitude, latitude, color = neighbourhood_group)) +
+geom_point(alpha = 0.8, size = 0.8) +
+labs(title = "Listing Locations by Borough") +
+theme_minimal()
+
+```
+
+skewness so logged
+
+Train / test split
+
+```{r}
+set.seed(4630)
+
+#predict log_price
+
+airbnb_model <- airbnb %>%
+select(
+log_price,
+neighbourhood_group,
+neighbourhood,
+room_type,
+minimum_nights,
+number_of_reviews,
+reviews_per_month,
+calculated_host_listings_count,
+availability_365,
+latitude,
+longitude
+)
+
+# stratify
+
+split <- initial_split(airbnb_model, prop = 0.7, strata = neighbourhood_group)
+train <- training(split)
+test  <- testing(split)
+
+nrow(train); nrow(test)
+
+get_metrics <- function(truth, estimate) {
+tibble(truth = truth,
+estimate = as.numeric(estimate)) %>%
+metrics(truth = truth, estimate = estimate) %>%
+filter(.metric %in% c("rmse", "rsq"))
+}
+
+get_metrics <- function(truth, estimate) {
+tibble(truth = truth,
+estimate = as.numeric(estimate)) %>%
+metrics(truth = truth, estimate = estimate) %>%
+filter(.metric %in% c("rmse", "rsq"))
+}
+
+```
+
+total sample size = 48645
+
+
+MLR
+
+```{r}
+lm_fit <- lm(
+log_price ~ neighbourhood_group + room_type +
+minimum_nights + number_of_reviews + reviews_per_month +
+calculated_host_listings_count + availability_365 +
+latitude + longitude,
+data = train
+)
+
+summary(lm_fit)
+
+
+lm_pred <- predict(lm_fit, newdata = test)
+
+lm_metrics <- get_metrics(test$log_price, lm_pred)
+lm_metrics
+
+```
+
+The multiple linear regression model achieved an RMSE of 0.464 on log(price) and an R² of 0.519. This means the model explains about 52% of the variability in log-transformed Airbnb prices
+
+An RMSE of 0.464 on the log scale corresponds roughly to a multiplicative factor of exp(0.464) = 1.59, meaning predictions are typically off by about 59% up or down in the original dollar prices.
+
+
+
+Ridge & Lasso
+
+```{r}
+x_train <- model.matrix(
+log_price ~ neighbourhood_group + neighbourhood + room_type +
+minimum_nights + number_of_reviews + reviews_per_month +
+calculated_host_listings_count + availability_365 +
+latitude + longitude,
+data = train
+)[, -1]
+
+x_test <- model.matrix(
+log_price ~ neighbourhood_group + neighbourhood + room_type +
+minimum_nights + number_of_reviews + reviews_per_month +
+calculated_host_listings_count + availability_365 +
+latitude + longitude,
+data = test
+)[, -1]
+
+y_train <- train$log_price
+y_test  <- test$log_price
+
+dim(x_train); dim(x_test)
+
+#Ridge
+set.seed(123)
+cv_ridge <- cv.glmnet(x_train, y_train, alpha = 0)
+plot(cv_ridge)
+
+bestlam_ridge <- cv_ridge$lambda.min
+bestlam_ridge
+
+ridge_pred <- predict(cv_ridge, s = bestlam_ridge, newx = x_test)
+ridge_metrics <- get_metrics(y_test, ridge_pred)
+ridge_metrics
+
+ridge_coef <- coef(cv_ridge, s = bestlam_ridge)
+ridge_coef[1:20, , drop=FALSE]
+
+#Lasso
+set.seed(123)
+cv_lasso <- cv.glmnet(x_train, y_train, alpha = 1)
+plot(cv_lasso)
+
+bestlam_lasso <- cv_lasso$lambda.min
+bestlam_lasso
+
+lasso_pred <- predict(cv_lasso, s = bestlam_lasso, newx = x_test)
+lasso_metrics <- get_metrics(y_test, lasso_pred)
+lasso_metrics
+
+lasso_coef <- coef(cv_lasso, s = bestlam_lasso)
+
+# Show nonzero coefficients (excluding intercept)
+
+lasso_coef[lasso_coef != 0]
+
+```
+
+Both Ridge and Lasso outperformed linear model and Lasso is slightly better than ridge
+
+
+Regression Tree & Random Forest
+
+```{r}
+set.seed(123)
+tree_fit <- tree(
+  log_price ~ neighbourhood_group + room_type +
+    minimum_nights + number_of_reviews + reviews_per_month +
+    calculated_host_listings_count + availability_365 +
+    latitude + longitude,
+  data = train
+)
+
+summary(tree_fit)
+plot(tree_fit); text(tree_fit, pretty = 0)
+
+set.seed(123)
+cv_tree <- cv.tree(tree_fit)
+plot(cv_tree$size, cv_tree$dev, type = "b",
+xlab = "Tree size", ylab = "CV deviance")
+
+best_size <- cv_tree$size[which.min(cv_tree$dev)]
+best_size
+
+tree_pruned <- prune.tree(tree_fit, best = best_size)
+plot(tree_pruned); text(tree_pruned, pretty = 0)
+
+tree_pred <- predict(tree_pruned, newdata = test)
+tree_metrics <- get_metrics(test$log_price, tree_pred)
+tree_metrics
+
+```
+
+tree map: the random forest is splited by room type in the first stage then driven by borough and latitude
+
+
+Random forest
+
+
