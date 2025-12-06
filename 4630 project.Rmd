@@ -45,7 +45,7 @@ airbnb <- airbnb_raw %>%
 glimpse(airbnb)
 ```
 
-EDA
+# EDA
 ```{r}
 # Distribution of price and log_price
 
@@ -61,7 +61,6 @@ labs(title = "Distribution of log(price)")
 
 
 # Boxplot by room type
-
 airbnb %>%
 ggplot(aes(room_type, price)) +
 geom_boxplot() +
@@ -69,7 +68,6 @@ coord_cartesian(ylim = c(0, 500)) +  # avoid extreme tails
 labs(title = "Price by Room Type (capped at 500)")
 
 # Boxplot by borough
-
 airbnb %>%
 ggplot(aes(neighbourhood_group, price)) +
 geom_boxplot() +
@@ -77,24 +75,20 @@ coord_cartesian(ylim = c(0, 500)) +
 labs(title = "Price by Borough (neighbourhood_group)")
 
 # Simple location scatter colored by borough
-
 airbnb %>%
 ggplot(aes(longitude, latitude, color = neighbourhood_group)) +
 geom_point(alpha = 0.8, size = 0.8) +
 labs(title = "Listing Locations by Borough") +
 theme_minimal()
-
 ```
 
 skewness so logged
 
-Train / test split
-
+# Train / test split
 ```{r}
 set.seed(4630)
 
 #predict log_price
-
 airbnb_model <- airbnb %>%
 select(
 log_price,
@@ -111,7 +105,6 @@ longitude
 )
 
 # stratify
-
 split <- initial_split(airbnb_model, prop = 0.7, strata = neighbourhood_group)
 train <- training(split)
 test  <- testing(split)
@@ -131,14 +124,12 @@ estimate = as.numeric(estimate)) %>%
 metrics(truth = truth, estimate = estimate) %>%
 filter(.metric %in% c("rmse", "rsq"))
 }
-
 ```
 
 total sample size = 48645
 
 
-MLR
-
+# MLR
 ```{r}
 lm_fit <- lm(
 log_price ~ neighbourhood_group + room_type +
@@ -150,12 +141,10 @@ data = train
 
 summary(lm_fit)
 
-
 lm_pred <- predict(lm_fit, newdata = test)
 
 lm_metrics <- get_metrics(test$log_price, lm_pred)
 lm_metrics
-
 ```
 
 The multiple linear regression model achieved an RMSE of 0.464 on log(price) and an R² of 0.519. This means the model explains about 52% of the variability in log-transformed Airbnb prices
@@ -164,8 +153,7 @@ An RMSE of 0.464 on the log scale corresponds roughly to a multiplicative factor
 
 
 
-Ridge & Lasso
-
+# Ridge & Lasso
 ```{r}
 x_train <- model.matrix(
 log_price ~ neighbourhood_group + neighbourhood + room_type +
@@ -220,14 +208,12 @@ lasso_coef <- coef(cv_lasso, s = bestlam_lasso)
 # Show nonzero coefficients (excluding intercept)
 
 lasso_coef[lasso_coef != 0]
-
 ```
 
 Both Ridge and Lasso outperformed linear model and Lasso is slightly better than ridge
 
 
-Regression Tree & Random Forest
-
+# Regression Tree & Random Forest
 ```{r}
 set.seed(123)
 tree_fit <- tree(
@@ -255,12 +241,56 @@ plot(tree_pruned); text(tree_pruned, pretty = 0)
 tree_pred <- predict(tree_pruned, newdata = test)
 tree_metrics <- get_metrics(test$log_price, tree_pred)
 tree_metrics
-
 ```
 
 tree map: the random forest is splited by room type in the first stage then driven by borough and latitude
 
 
-Random forest
+# Random forest
+```{r}
+set.seed(123)
+
+rf_fit <- randomForest(
+  log_price ~ neighbourhood_group + room_type +
+    minimum_nights + number_of_reviews + reviews_per_month +
+    calculated_host_listings_count + availability_365 +
+    latitude + longitude,
+  data = train,
+  ntree = 500,                                   # number of trees
+  mtry  = floor(sqrt(ncol(train) - 1)),          # vars tried at each split
+  importance = TRUE
+)
+
+rf_fit
+```
+
+## Generate test-set predictions
+```{r}
+rf_pred <- predict(rf_fit, newdata = test)
+
+rf_metrics <- get_metrics(test$log_price, rf_pred)
+rf_metrics
+```
+
+## Add to comparison table:
+```{r}
+all_metrics <- bind_rows(
+  lm_metrics    %>% mutate(model = "Linear regression"),
+  ridge_metrics %>% mutate(model = "Ridge"),
+  lasso_metrics %>% mutate(model = "Lasso"),
+  tree_metrics  %>% mutate(model = "Regression tree"),
+  rf_metrics    %>% mutate(model = "Random forest")
+) %>%
+  select(model, .metric, .estimate)
+
+all_metrics
+```
+
+## Variable Importance:
+```{r}
+importance(rf_fit)
+varImpPlot(rf_fit, n.var = 9, main = "Random Forest Variable Importance")
+```
+
 
 
