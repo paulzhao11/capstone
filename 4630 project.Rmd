@@ -82,8 +82,6 @@ labs(title = "Listing Locations by Borough") +
 theme_minimal()
 ```
 
-skewness so logged
-
 # Train / test split
 ```{r}
 set.seed(4630)
@@ -125,8 +123,6 @@ metrics(truth = truth, estimate = estimate) %>%
 filter(.metric %in% c("rmse", "rsq"))
 }
 ```
-
-total sample size = 48645
 
 
 # MLR
@@ -209,8 +205,6 @@ lasso_coef <- coef(cv_lasso, s = bestlam_lasso)
 
 lasso_coef[lasso_coef != 0]
 ```
-
-Both Ridge and Lasso outperformed linear model and Lasso is slightly better than ridge
 
 
 # Regression Tree & Random Forest
