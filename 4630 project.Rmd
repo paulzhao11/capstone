@@ -233,8 +233,6 @@ tree_metrics <- get_metrics(test$log_price, tree_pred)
 tree_metrics
 ```
 
-tree map: the random forest is splited by room type in the first stage then driven by borough and latitude
-
 
 # Random forest
 ```{r}
