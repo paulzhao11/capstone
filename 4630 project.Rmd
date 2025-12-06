@@ -143,10 +143,6 @@ lm_metrics <- get_metrics(test$log_price, lm_pred)
 lm_metrics
 ```
 
-The multiple linear regression model achieved an RMSE of 0.464 on log(price) and an R² of 0.519. This means the model explains about 52% of the variability in log-transformed Airbnb prices
-
-An RMSE of 0.464 on the log scale corresponds roughly to a multiplicative factor of exp(0.464) = 1.59, meaning predictions are typically off by about 59% up or down in the original dollar prices.
-
 
 
 # Ridge & Lasso
