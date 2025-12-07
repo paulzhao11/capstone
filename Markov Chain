@@ -34,3 +34,5 @@ ggplot(fashion_data, aes(x = Followers, y = Likes)) +
     fill = "Count"
   ) +
   theme_minimal()
+
+
