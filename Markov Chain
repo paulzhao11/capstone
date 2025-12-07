@@ -1,3 +1,212 @@
+
+library(ggplot2)
+library(dplyr)
+library(lubridate)
+
+fashion_data <- read.csv('/Users/zhaoshibo/Desktop/dataversefile1/fashiondataInstagram.csv')
+
+#filter data
+fashion_data <- fashion_data %>%
+  mutate(
+    Likes    = suppressWarnings(as.numeric(Likes)),
+    Comments = suppressWarnings(as.numeric(Comments))
+  ) %>%
+  filter(!is.na(Likes), !is.na(Comments),
+         Likes >= 25)   # keep only posts with meaningful engagement
+
+
+# --- helpers (do NOT rename columns; we only look them up) ---
+get_col <- function(df, primary, aliases = character()) {
+  # return the first column that exists, checking primary then aliases, without changing names
+  candidates <- c(primary, aliases)
+  hit <- candidates[candidates %in% names(df)]
+  if (length(hit) == 0) {
+    stop(sprintf("Column not found. Tried: %s", paste(candidates, collapse = ", ")))
+  }
+  hit[1]
+}
+
+# case-insensitive finder that returns the ACTUAL name (still doesn't rename anything)
+get_col_ci <- function(df, candidates) {
+  nms <- names(df)
+  ln  <- tolower(nms)
+  for (cand in candidates) {
+    idx <- which(ln == tolower(cand))
+    if (length(idx) > 0) return(nms[idx[1]])
+  }
+  stop(sprintf("Column not found (case-insensitive). Tried: %s", paste(candidates, collapse = ", ")))
+}
+
+# --- 1) coerce numeric columns if they exist (no renaming) ---
+num_wishlist <- c(
+  "Followings","Followers","MediaCount","Likes","Comments",
+  "Selfie","BodySnap","Marketing","ProductOnly","NonFashion","Face","Logo","BrandLogo",
+  "Smile","Outdoor","NumberOfPeople","NumberOfFashionProduct",
+  "Anger","Contempt","Disgust","Fear","Happiness","Neutral","Sadness","Surprise"
+)
+
+num_exist <- intersect(names(fashion_data), num_wishlist)
+if (length(num_exist) > 0) {
+  fashion_data <- fashion_data %>%
+    mutate(across(all_of(num_exist), ~ suppressWarnings(as.numeric(.x))))
+}
+
+# --- 2) creation time -> POSIXct/Date (keep original names; no renaming) ---
+time_candidates <- c(
+  "CreationTime","CreatedTime","Timestamp","Time","PostTime",
+  "Creation Time","Created Time","Post Time","Date","PostedDate","PostDate","Time.Date"
+)
+ct_name <- tryCatch(get_col_ci(fashion_data, time_candidates), error = function(e) NA_character_)
+if (is.na(ct_name)) stop("No time-like column found. Tried common names; add yours to time_candidates.")
+
+# Pattern: e.g. "1/27/16 8:26", "01/27/2016 08:26", "1/27/16 8:26:05", "1/27/16 8:26 PM"
+pat_mdy_time <- "^\\s*\\d{1,2}/\\d{1,2}/(\\d{2}|\\d{4})\\s+\\d{1,2}:\\d{2}(:\\d{2})?\\s*([AaPp][Mm])?\\s*$"
+
+# Keep only rows that match the pattern (drop the rest)
+keep_idx <- grepl(pat_mdy_time, as.character(fashion_data[[ct_name]]), perl = TRUE)
+
+# Optional: see how many will be removed
+dropped_n <- sum(!keep_idx)
+message(sprintf("Time rows kept: %d | dropped (non-matching): %d", sum(keep_idx), dropped_n))
+
+fashion_data <- fashion_data %>%
+  dplyr::filter(keep_idx) %>%
+  dplyr::mutate(
+    # Parse exactly the pattern we accepted: try HMS first, then HM; both allow 2- or 4-digit year, AM/PM
+    created_at = {
+      x <- as.character(.data[[ct_name]])
+      p <- suppressWarnings(lubridate::mdy_hms(x, tz = "UTC", quiet = TRUE))   # handles "... HH:MM:SS" ± AM/PM
+      need <- is.na(p)
+      if (any(need)) {
+        p[need] <- suppressWarnings(lubridate::mdy_hm(x[need], tz = "UTC", quiet = TRUE))  # "... HH:MM" ± AM/PM
+      }
+      # final tiny fallback with base for rare locales
+      need <- is.na(p)
+      if (any(need)) {
+        p[need] <- as.POSIXct(strptime(x[need], "%m/%d/%y %I:%M %p", tz = "UTC"))
+      }
+      need <- is.na(p)
+      if (any(need)) {
+        p[need] <- as.POSIXct(strptime(x[need], "%m/%d/%Y %I:%M %p", tz = "UTC"))
+      }
+      need <- is.na(p)
+      if (any(need)) {
+        p[need] <- as.POSIXct(strptime(x[need], "%m/%d/%y %H:%M", tz = "UTC"))
+      }
+      need <- is.na(p)
+      if (any(need)) {
+        p[need] <- as.POSIXct(strptime(x[need], "%m/%d/%Y %H:%M", tz = "UTC"))
+      }
+      p
+    },
+    date = as.Date(created_at)
+  ) %>%
+  filter(!is.na(date)) %>%
+  filter(date > as.Date("1970-01-01"))
+
+
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+
+# Find brand name & category columns
+brand_col <- grep("brandname|brand_name", names(fashion_data),
+                  ignore.case = TRUE, value = TRUE)[1]
+brandcat_col <- grep("brandcategory|brand_category|category",
+                     names(fashion_data), ignore.case = TRUE, value = TRUE)[1]
+
+if (is.na(brand_col))  stop("No column found for brand name.")
+if (is.na(brandcat_col)) stop("No column found for brand category.")
+
+brand_col; brandcat_col
+
+brand_summary <- fashion_data %>%
+  filter(!is.na(.data[[brand_col]])) %>%
+  group_by(brand = .data[[brand_col]]) %>%
+  summarise(
+    n_posts       = n(),
+    avg_likes     = mean(Likes, na.rm = TRUE),
+    avg_followers = mean(Followers, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  # keep brands with enough data to be meaningful
+  filter(n_posts >= 20) %>%          
+  arrange(desc(avg_likes))
+
+head(brand_summary)
+
+top_brands <- brand_summary %>%
+  slice_max(avg_likes, n = 15)
+
+top_brands_long <- top_brands %>%
+  pivot_longer(cols = c(avg_likes, avg_followers),
+               names_to = "metric", values_to = "value")
+
+
+
+library(ggrepel)
+
+# Label top 10 by avg likes
+label_brands <- brand_summary %>%
+  arrange(desc(avg_likes)) %>%
+  slice_head(n = 10) %>%
+  pull(brand)
+
+ggplot(brand_summary, aes(x = avg_followers, y = avg_likes)) +
+  geom_point(aes(size = n_posts), alpha = 0.6, color = "steelblue") +
+  geom_text_repel(
+    data = subset(brand_summary, brand %in% label_brands),
+    aes(label = brand),
+    size = 3
+  ) +
+  scale_x_continuous(labels = scales::comma) +
+  labs(
+    title = "Brand Performance: Likes vs Followers",
+    x = "Average Followers",
+    y = "Average Likes",
+    size = "Number of Posts"
+  ) +
+  theme_minimal()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 library(ggplot2)
 library(dplyr)
 library(lubridate)
