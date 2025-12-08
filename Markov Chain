@@ -202,8 +202,6 @@ second_eigenvalue
 # Optionally inspect eigenvalues
 eigenvalues[1:10]
 
-# 10) Example plots (optional) ----------------------------------------
-
 # Top tags by walk_score
 rank_compare %>%
   slice_max(walk_score, n = 20) %>%
