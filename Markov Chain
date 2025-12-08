@@ -1,38 +1,232 @@
-get_col_ci <- function(df, candidates) {
-  nms <- names(df); ln <- tolower(nms)
-  for (cand in candidates) {
-    idx <- which(ln == tolower(cand))
-    if (length(idx) > 0) return(nms[idx[1]])
+library(dplyr)
+library(stringr)
+library(tidyr)
+
+# 1) Detect hashtag column
+tag_col <- grep("hashtags", names(fashion_data), ignore.case = TRUE, value = TRUE)[1]
+stopifnot(!is.na(tag_col))
+
+# 2) Long table: post_id, tag
+fashion_data$post_id <- seq_len(nrow(fashion_data))
+
+hashtags_long <- fashion_data %>%
+  mutate(tags_raw = as.character(.data[[tag_col]])) %>%
+  filter(!is.na(tags_raw), tags_raw != "") %>%
+  mutate(tags_vec = str_split(tags_raw, ",")) %>%
+  unnest(tags_vec) %>%
+  transmute(
+    post_id,
+    tag = str_trim(tolower(tags_vec)) |> str_replace_all("^#", "")
+  ) %>%
+  filter(tag != "") %>%
+  distinct(post_id, tag)
+
+# 3) Tag frequency and top N
+tag_counts <- hashtags_long %>%
+  count(tag, sort = TRUE)
+
+top_tags <- tag_counts %>%
+  filter(n >= 10) %>%        # appear at least 10 times
+  slice_head(n = 100) %>%    # from those, take the top 100 by frequency
+  pull(tag)
+
+length(top_tags)
+head(top_tags)
+
+# Keep only rows with top tags
+ht_top <- hashtags_long %>%
+  filter(tag %in% top_tags)
+
+# Map tag -> integer index 1..K
+tag_levels <- sort(unique(ht_top$tag))
+K <- length(tag_levels)
+
+tag_to_idx <- setNames(seq_len(K), tag_levels)
+
+ht_top <- ht_top %>%
+  mutate(
+    tag_idx = tag_to_idx[tag],
+    post_idx = as.integer(factor(post_id))  # compress post IDs to 1..M
+  )
+
+M <- length(unique(ht_top$post_idx))
+
+# 4.5) Follower vector per post_idx -----------------------------
+
+post_followers_df <- ht_top %>%
+  distinct(post_idx, post_id) %>%
+  left_join(
+    fashion_data %>%
+      select(post_id, Followers),
+    by = "post_id"
+  ) %>%
+  mutate(
+    Followers = as.numeric(Followers),
+    Followers = ifelse(is.na(Followers) | Followers <= 0, 1, Followers)
+  ) %>%
+  arrange(post_idx)
+
+# Vector: index = post_idx (1..M), value = follower count
+post_follower_vec <- post_followers_df$Followers
+
+# For each tag index, which posts contain it?
+posts_by_tag <- ht_top %>%
+  group_by(tag_idx) %>%
+  summarise(posts = list(unique(post_idx)), .groups = "drop") %>%
+  arrange(tag_idx)
+
+# For each post index, which tags does it contain?
+tags_by_post <- ht_top %>%
+  group_by(post_idx) %>%
+  summarise(tags = list(unique(tag_idx)), .groups = "drop") %>%
+  arrange(post_idx)
+
+# Convert lists for easy indexed access
+posts_by_tag_list <- posts_by_tag$posts
+tags_by_post_list <- tags_by_post$tags
+
+# Sanity:
+K; M
+
+set.seed(123)
+
+simulate_walk <- function(
+  posts_by_tag_list,
+  tags_by_post_list,
+  post_follower_vec,
+  n_steps,
+  teleport_prob = 0.02
+) {
+  K <- length(posts_by_tag_list)
+  M <- length(tags_by_post_list)
+  
+  # Start at random tag
+  current_tag <- sample.int(K, 1)
+  
+  visits <- integer(K)
+  path   <- integer(n_steps)   # store the sequence of visited tags
+  
+  for (step in seq_len(n_steps)) {
+    # Teleport with small probability
+    if (runif(1) < teleport_prob) {
+      current_tag <- sample.int(K, 1)
+    } else {
+      # Normal step: pick random post with this tag (weighted by followers)
+      posts_for_tag <- posts_by_tag_list[[current_tag]]
+      
+      if (length(posts_for_tag) == 0) {
+        # If no posts (shouldn't happen with top tags, but be safe): teleport
+        current_tag <- sample.int(K, 1)
+      } else {
+        # NEW: weight posts by followers
+        weights <- post_follower_vec[posts_for_tag]
+        w_sum   <- sum(weights)
+        if (!is.finite(w_sum) || w_sum <= 0) {
+          # fallback to uniform if something weird
+          post <- sample(posts_for_tag, 1)
+        } else {
+          prob  <- weights / w_sum
+          post  <- sample(posts_for_tag, 1, prob = prob)
+        }
+        
+        # From that post, pick random tag (uniform among tags in the post)
+        tags_for_post <- tags_by_post_list[[post]]
+        if (length(tags_for_post) == 0) {
+          current_tag <- sample.int(K, 1)
+        } else {
+          current_tag <- sample(tags_for_post, 1)
+        }
+      }
+    }
+    
+    # Record visit + path
+    visits[current_tag] <- visits[current_tag] + 1L
+    path[step]          <- current_tag
   }
-  stop("None of these columns found: ", paste(candidates, collapse = ", "))
+  
+  list(
+    visits = tibble(tag_idx = seq_len(K), visits = visits),
+    path   = path
+  )
 }
 
-likes_col   <- get_col_ci(fashion_data, c("Likes","likes"))
-followers_col <- get_col_ci(fashion_data, c("Followers","followers"))
-media_col   <- get_col_ci(fashion_data, c("MediaCount","media_count"))
-prod_col    <- get_col_ci(fashion_data, c("NumberOfFashionProduct","number_of_fashion_product"))
+set.seed(1)
+walk_res <- simulate_walk(
+  posts_by_tag_list,
+  tags_by_post_list,
+  post_follower_vec,
+  n_steps = 50000,     # CHANGED: run 50k steps
+  teleport_prob = 0.02 # CHANGED: 2% teleport
+)
 
-fashion_num <- fashion_data %>%
+# 7) Walk scores and ranking -----------------------------------------
+walk_scores <- walk_res$visits %>%
   mutate(
-    Likes    = as.numeric(.data[[likes_col]]),
-    Followers= as.numeric(.data[[followers_col]]),
-    MediaCnt = as.numeric(.data[[media_col]]),
-    N_fashion_prod = as.numeric(.data[[prod_col]])
+    walk_score = visits / sum(visits),
+    tag        = tag_levels[tag_idx]
   ) %>%
-  filter(!is.na(Likes), !is.na(Followers))
-library(ggplot2)
+  select(tag, walk_score, visits)
 
-ggplot(fashion_data, aes(x = Followers, y = Likes)) +
-  stat_bin2d(bins = 40) +
-  scale_fill_viridis_c(option = "C", trans = "log10") +
-  scale_x_log10(labels = scales::comma) +
-  scale_y_log10(labels = scales::comma) +
+# Join with raw counts for comparison
+rank_compare <- tag_counts %>%
+  filter(tag %in% tag_levels) %>%
+  left_join(walk_scores, by = "tag") %>%
+  arrange(desc(walk_score))
+
+head(rank_compare, 40)
+
+# 8) Transition matrix from simulated path (100 x 100) ----------------
+K <- length(tag_levels)
+Tmat <- matrix(0, nrow = K, ncol = K)
+
+path <- walk_res$path
+
+for (i in seq_len(length(path) - 1)) {
+  from <- path[i]
+  to   <- path[i + 1]
+  if (!is.na(from) && !is.na(to) && from >= 1 && from <= K && to >= 1 && to <= K) {
+    Tmat[from, to] <- Tmat[from, to] + 1
+  }
+}
+
+# Normalize rows to sum to 1
+row_sums <- rowSums(Tmat)
+T_norm <- Tmat / ifelse(row_sums == 0, 1, row_sums)
+
+# 9) Eigen decomposition and second eigenvalue ------------------------
+eig <- eigen(T_norm)
+eigenvalues <- Re(eig$values)
+second_eigenvalue <- eigenvalues[2]
+second_eigenvalue
+
+# Optionally inspect eigenvalues
+eigenvalues[1:10]
+
+# 10) Example plots (optional) ----------------------------------------
+
+# Top tags by walk_score
+rank_compare %>%
+  slice_max(walk_score, n = 20) %>%
+  ggplot(aes(x = reorder(tag, walk_score), y = walk_score)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
   labs(
-    title = "Followers vs Likes (Density Heatmap, Log Scale)",
-    x = "Followers (log scale)",
-    y = "Likes (log scale)",
-    fill = "Count"
+    title = "Hashtag Importance from Follower-weighted Random Walk",
+    x = "Hashtag",
+    y = "Walk Score"
   ) +
   theme_minimal()
 
+# Frequency vs walk_score
+rank_compare %>%
+  ggplot(aes(x = n, y = walk_score, label = tag)) +
+  geom_point(alpha = 0.7, color = "darkorange") +
+  geom_text_repel(size = 3, max.overlaps = 20) +
+  scale_x_log10() +
+  labs(
+    title = "Hashtag Frequency vs Random-Walk Importance",
+    x = "Hashtag Frequency (log scale)",
+    y = "Walk Score"
+  ) +
+  theme_minimal()
 
